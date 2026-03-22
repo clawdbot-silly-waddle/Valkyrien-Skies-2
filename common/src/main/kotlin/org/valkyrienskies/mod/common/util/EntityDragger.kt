@@ -252,6 +252,18 @@ object EntityDragger {
             return vec3
         }
 
+        // Entity dragging (ship movement/rotation) can push the player past the ship edge.
+        // The while loops below can only REDUCE movement — they can't push the player back.
+        // If no part of the hitbox has ground below (full AABB check, not point sampling),
+        // skip backOff to let the player recover.
+        val belowBBox = player.getBoundingBox().move(0.0, -player.maxUpStep().toDouble(), 0.0)
+        if (cLevel.noCollision(player, belowBBox)) {
+            val shipBBox = belowBBox.toJOML().transform(ship.worldToShip).toMinecraft()
+            if (cLevel.noCollision(shipBBox)) {
+                return vec3
+            }
+        }
+
         // Transform only the horizontal world movement into ship space for edge checks.
         // For tilted ships, this correctly distributes horizontal movement across all
         // ship-space axes, so all three while loops provide edge protection.
@@ -360,6 +372,7 @@ object EntityDragger {
         val shipBBox = movedBBox.toJOML().transform(ship.worldToShip).toMinecraft()
         return !level.noCollision(shipBBox)
     }
+
     /**
      * Check if the given entity should be dragged. Shipyard entities and ones marked as non-draggable return false.
      */
