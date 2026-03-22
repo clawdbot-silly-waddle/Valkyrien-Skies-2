@@ -253,25 +253,19 @@ object EntityDragger {
         }
 
         // Entity dragging (ship movement/rotation) can push the player past the ship edge.
-        // The while loops below can only REDUCE movement — they can't push the player back.
-        // If no part of the hitbox has ground below (full AABB check, not point sampling),
-        // skip backOff to let the player recover.
-        val belowBBox = player.getBoundingBox().move(0.0, -player.maxUpStep().toDouble(), 0.0)
-        if (cLevel.noCollision(player, belowBBox)) {
-            val shipBBox = belowBBox.toJOML().transform(ship.worldToShip).toMinecraft()
-            if (cLevel.noCollision(shipBBox)) {
-                return vec3
-            }
+        // The while loops below can only REDUCE movement toward zero — they can't push
+        // the player back onto the ship. If no ground exists below the player at all,
+        // skip backOff entirely to let the player recover via normal movement.
+        if (!hasGroundBelow(cLevel, player)) {
+            return vec3
         }
 
         // Transform only the horizontal world movement into ship space for edge checks.
-        // For tilted ships, this correctly distributes horizontal movement across all
-        // ship-space axes, so all three while loops provide edge protection.
         val shipSpace = ship.worldToShip.transformDirection(Vector3d(vec3.x, 0.0, vec3.z), Vector3d())
         var d = shipSpace.x
-        var e = shipSpace.y
         var f = shipSpace.z
 
+        // Reduce ship-EAST component while destination has no ground below
         while (d != 0.0 && !isValidWalkablePosition(cLevel, ship, player, d, Direction.EAST)) {
             if (d < 0.025 && d >= -0.025) {
                 d = 0.0
@@ -282,6 +276,7 @@ object EntityDragger {
             }
         }
 
+        // Reduce ship-SOUTH component while destination has no ground below
         while (f != 0.0 && !isValidWalkablePosition(cLevel, ship, player, f, Direction.SOUTH)) {
             if (f < 0.025 && f >= -0.025) {
                 f = 0.0
@@ -292,85 +287,72 @@ object EntityDragger {
             }
         }
 
-        while (e != 0.0 && !isValidWalkablePosition(cLevel, ship, player, e, Direction.UP)) {
-            if (e < 0.025 && e >= -0.025) {
-                e = 0.0
-            } else if (e > 0.0) {
-                e -= 0.025
-            } else {
-                e += 0.025
-            }
-        }
-
-        while (d != 0.0 && f != 0.0 && e != 0.0 &&
+        // Reduce both components together for diagonal edge case
+        while (d != 0.0 && f != 0.0 &&
             !isValidWalkablePosition(cLevel, ship, player, d, Direction.EAST) &&
-            !isValidWalkablePosition(cLevel, ship, player, f, Direction.SOUTH) &&
-            !isValidWalkablePosition(cLevel, ship, player, e, Direction.UP)) {
-            if (d < 0.025 && d >= -0.025) {
-                d = 0.0
-            } else if (d > 0.0) {
-                d -= 0.025
-            } else {
-                d += 0.025
-            }
-
-            if (f < 0.025 && f >= -0.025) {
-                f = 0.0
-            } else if (f > 0.0) {
-                f -= 0.025
-            } else {
-                f += 0.025
-            }
-
-            if (e < 0.025 && e >= -0.025) {
-                e = 0.0
-            } else if (e > 0.0) {
-                e -= 0.025
-            } else {
-                e += 0.025
-            }
+            !isValidWalkablePosition(cLevel, ship, player, f, Direction.SOUTH)) {
+            if (d < 0.025 && d >= -0.025) d = 0.0 else if (d > 0.0) d -= 0.025 else d += 0.025
+            if (f < 0.025 && f >= -0.025) f = 0.0 else if (f > 0.0) f -= 0.025 else f += 0.025
         }
 
-        // Horizontal fully blocked — return only gravity, like vanilla returning Vec3(0, vec.y, 0)
-        if (d == 0.0 && e == 0.0 && f == 0.0) {
+        // Horizontal fully blocked — return only gravity
+        if (d == 0.0 && f == 0.0) {
             return Vec3(0.0, vec3.y, 0.0)
         }
 
-        // Transform reduced horizontal back to world space and combine with original gravity.
-        // Like vanilla's `return new Vec3(d, vec.y, e)` — only horizontal is adjusted.
-        // normalize+mul is needed because shipToWorld may include scaling (ShipTransform has
-        // shipToWorldScaling), so transformDirection doesn't preserve length.
-        val motionLength = sqrt(d * d + e * e + f * f)
-        val adjusted = ship.shipToWorld.transformDirection(Vector3d(d, e, f)).normalize().mul(motionLength)
+        // Transform reduced ship-space movement back to world space.
+        // normalize().mul(motionLength) compensates for any ship scaling.
+        val motionLength = sqrt(d * d + f * f)
+        val adjusted = ship.shipToWorld.transformDirection(Vector3d(d, 0.0, f)).normalize().mul(motionLength)
         return Vec3(adjusted.x, vec3.y, adjusted.z)
     }
 
+    /**
+     * Check if there's walkable ground at the destination when moving [step] blocks
+     * in the ship-space [dir] direction. Uses VS2's polygon collision system which
+     * projects ship block collision shapes into world space, avoiding the AABB rotation
+     * expansion that made the previous approach always find blocks.
+     *
+     * For world blocks: standard noCollision() check at destination.
+     * For ship blocks: getShipPolygonsCollidingWithEntity() checks actual ship block
+     * collision shapes in world space (no coordinate transform artifacts).
+     */
     private fun isValidWalkablePosition(
         level: Level, ship: Ship, player: Player, step: Double, dir: Direction
     ): Boolean {
-        // Matching vanilla's noCollision(entity, bbox.move(d, -maxUpStep, 0)) approach:
-        // move the full bounding box to the potential position and check for ground support.
-        // Unlike the old raycast approach, this accounts for the full hitbox width,
-        // letting the player walk until their hitbox edge reaches the ship edge.
-        //
-        // Note: transforming an AABB to ship space produces a larger axis-aligned box that
-        // encloses the rotated box. This makes edge protection slightly weaker on highly
-        // rotated ships (detecting ground that isn't directly under the player). Acceptable
-        // trade-off vs the old single-point raycast which was 0.3 blocks too restrictive.
-        val offset = ship.shipToWorld.transformDirection(Vector3d(dir.step())).normalize().mul(step)
-        val movedBBox = player.getBoundingBox().move(
-            offset.x, offset.y - player.maxUpStep().toDouble(), offset.z
+        val stepDir = ship.shipToWorld.transformDirection(Vector3d(dir.step())).normalize().mul(step)
+        // Movement = step in ship direction + maxUpStep downward (world Y), matching vanilla
+        val potentialMovement = Vec3(stepDir.x, -player.maxUpStep().toDouble(), stepDir.z)
+        val movedBBox = player.getBoundingBox().move(potentialMovement)
+
+        // Check world blocks at destination
+        if (!level.noCollision(player, movedBBox)) return true
+
+        // Check ship blocks using VS2's polygon collision (handles rotation correctly).
+        // inflate(-0.1) shrinks the search bbox slightly to avoid false edge detection.
+        val shipPolygons = EntityShipCollisionUtils.getShipPolygonsCollidingWithEntity(
+            player, Vec3.ZERO, movedBBox.inflate(-0.1), level
         )
+        return shipPolygons.isNotEmpty()
+    }
 
-        // Check world blocks for ground support
-        if (!level.noCollision(player, movedBBox)) {
-            return true
-        }
+    /**
+     * Check if the player currently has any ground below them (within maxUpStep).
+     * Used as an escape hatch: if entity dragging pushed the player fully past the
+     * ship edge, skip backOff to let them recover via normal movement.
+     */
+    private fun hasGroundBelow(level: Level, player: Player): Boolean {
+        val downMovement = Vec3(0.0, -player.maxUpStep().toDouble(), 0.0)
+        val belowBBox = player.getBoundingBox().move(downMovement)
 
-        // Check ship blocks by transforming the AABB to ship space (= shipyard coordinates).
-        // Ship blocks are stored in the shipyard, so noCollision at those coords checks them.
-        val shipBBox = movedBBox.toJOML().transform(ship.worldToShip).toMinecraft()
-        return !level.noCollision(shipBBox)
+        // Check world blocks
+        if (!level.noCollision(player, belowBBox)) return true
+
+        // Check ship blocks via polygon collision
+        val shipPolygons = EntityShipCollisionUtils.getShipPolygonsCollidingWithEntity(
+            player, Vec3.ZERO, belowBBox.inflate(-0.1), level
+        )
+        return shipPolygons.isNotEmpty()
     }
 
     /**
